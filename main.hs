@@ -1,5 +1,6 @@
 import Data.List
 import Data.Function
+import Debug.Trace
 
 
 -- A regular expression; we will allow union and concatenation operations to 
@@ -28,6 +29,7 @@ instance Show Regex where
                    where 
                      bracket r'@(Union _) = "(" ++ show r' ++ ")"
                      bracket r' = show r'
+  show (Union []) = "∅"
   show (Union rs)  = intercalate "|" $ map show rs
 
 
@@ -86,10 +88,20 @@ match s (Star r)
 
 
 -- Simplify a given regular expression
+
+-- Simplify an expression
+-- Handle both the forward and reverse directions
+-- (because the underlying simplify' function is not symmetric)
 simplify :: Regex -> Regex
 simplify r = if r == r' then r else simplify r'
-           where r' = (simplify' . flatten) r
+           where r' = fixSimplify $ rev $ fixSimplify $ rev r
 
+-- Simplify until a fixed-point
+fixSimplify :: Regex -> Regex
+fixSimplify r = if r == r' then r else fixSimplify r'
+              where r' = (simplify' . flatten) r
+
+-- Simplifying regex transformations
 simplify' :: Regex -> Regex
 
 -- Atoms and Basic Reductions
@@ -100,15 +112,27 @@ simplify' (Union [])   = Empty
 simplify' (Union [r])  = simplify' r
 simplify' (Concat [r]) = r
 
---simplify' (Concat (Star q) r) | q == r = Concat r' (Star r') where r' = reduce r
-
 -- Concatenation simplifications
 simplify' (Concat rs)
   -- An empty set concatenated with anything yields an empty set
   | Empty `elem` rs = Empty
+  
+  -- Push things through stars from back to front (abc...k)*b -> a(bc...kb)*
+  | any isStar rs && pushable afterStar
+    = let newAfter = case afterStar of
+                          Star (Concat (c:cs)):r:rs' -> c:Star (Concat (cs ++ [r])):rs'
+                          Star c:r:rs'               -> r:Star c:rs'
+       in simplify' $ Concat $ beforeStar ++ newAfter
 
   -- Recursively simplify the concatenation, and remove epsilons
   | otherwise       = Concat $ map simplify' $ filter (/= Concat []) rs
+
+  where isStar (Star _) = True
+        isStar _        = False
+        (beforeStar, afterStar) = break isStar rs
+        pushable (Star (Concat (r:_)):q:_) = r == q
+        pushable (Star r:q:_)              = r == q
+        pushable _                         = False
 
 -- Union Simplifications
 simplify' (Union rs) 
@@ -117,25 +141,50 @@ simplify' (Union rs)
   -- so the recursive call operates on a reduced form; no infinite loops.
   | Concat [] `elem` rs && any isPlus rs
     = simplify' $ Union (filter (/= Concat []) nonplus ++ map toStar plus)
+  
+  -- Factor things out of unions (front and back)
+  | pref /= []
+    = simplify' $ Concat $ pref ++ [Union (map unpref rs)]
+  | suff /= []
+    = simplify' $ Concat $ Union (map unsuff rs) : suff
 
   -- Recursively simplify union, remove empty sets
   | otherwise
     = Union $ nub $ map simplify' $ filter (/= Empty) rs
   
   -- Utilities
-  where isPlus (Concat [])           = False
-        isPlus (Concat (Star r:rs')) = r == Concat rs'
-        isPlus (Concat rs)           = case last rs of
-                                            Star r -> r == Concat (init rs)
-                                            _      -> False
+  where isPlus (Concat [])             = False
+        isPlus (Concat (Star r : rs')) = if length rs' == 1
+                                         then r == head rs'
+                                         else r == Concat rs'
+        isPlus (Concat rs)             = case last rs of
+                                              Star r -> if length rs == 2
+                                                        then r == head rs
+                                                        else Concat (init rs) == r
+                                              _      -> False
+        isPlus _                       = False
         
         (plus, nonplus) = partition isPlus rs
 
         -- To be called only after r is already known to be a plus
         toStar r = case r of
                         Concat (Star r':_) -> Star r'
+                        Concat []          -> error "Factoring out epsilon?"
                         Concat rs'         -> last rs'
                         _                  -> r
+        -- The longest common prefix (suffix) of the union args
+        pref = longestCommonPrefix $ map prefArgs rs
+        suff = reverse $ longestCommonPrefix $ map (reverse . prefArgs) rs
+        prefArgs (Concat rs') = rs'
+        prefArgs r = [r]
+        -- To be called only if r is known to be an element of a union
+        -- with a common prefix
+        unpref r = case r of
+                        Concat rs' -> Concat $ drop (length pref) rs'
+                        _          -> Concat []
+        unsuff r = case r of
+                        Concat rs' -> Concat $ take (length rs' - length suff) rs'
+                        _          -> Concat []
 
 -- Star Simplifications
 simplify' (Star r)
@@ -146,7 +195,8 @@ simplify' (Star r)
          Empty     -> Concat []
          _         -> Star (simplify' r)
 
--- Flattening
+
+-- Flatten a regex
 flatten :: Regex -> Regex
 flatten (Concat rs) = Concat $ concatMap (sublists . flatten) rs
                     where
@@ -159,6 +209,13 @@ flatten (Union rs)  = Union $ concatMap (sublists . flatten) rs
 flatten (Star r)    = Star (flatten r)
 flatten r           = r
 
+-- Reverse a regex
+rev :: Regex -> Regex
+rev (Concat rs) = Concat $ reverse $ map rev rs
+rev (Union rs) = Union $ map rev rs
+rev (Star r) = Star $ rev r
+rev r = r
+
 
 longestCommonPrefix :: Eq a => [[a]] -> [a]
 longestCommonPrefix xs 
@@ -169,8 +226,6 @@ longestCommonPrefix xs
   where lcp [] _          = []
         lcp _ []          = []
         lcp (x:xs) (y:ys) = if x == y then x:lcp xs ys else []
-
-
 
 
 
@@ -188,10 +243,16 @@ m1 = a <.> aa' <.> b
 m2 = aa' <.> b <.> b
 m = m1 <+> m2
 
+m1' = b <.> aa' <.> a
+m2' = b <.> b <.> aa'
+m' = m1' <+> m2'
+
 aaplus = Epsilon <+> Concat [a, a, Star $ Concat [a, a]]
 plusaa = Union [Concat [Star $ Concat [a, a], a, a], Epsilon]
 aaplus' = Union [Epsilon, Concat [Concat [a,a], Star $ Concat [a, a]]]
 plusaa' = Union [Concat [Star $ Concat [a, a], Concat [a,a]], Epsilon]
+frontfactor = a <+> a <.> a <.> star a
+backfactor = a <+> star a <.> a <.> a
 
 
 testMatch :: IO ()
@@ -260,6 +321,11 @@ main = do print re
           print $ simplify re2
           print m
           print $ simplify m
+          print "Reverse"
+          print $ rev m
+          print $ simplify $ rev m
+          print m'
+          print $ simplify m'
           print aaplus
           print $ simplify aaplus
           print plusaa
@@ -268,10 +334,9 @@ main = do print re
           print $ simplify aaplus'
           print plusaa'
           print $ simplify plusaa'
-          testMatch
-          print  m
-          print $ accept m "ab"
-          print $ accept m "bb"
-          print $ accept m "aaab"
-          print $ accept m "aabb"
-          print $ accept m "aabbb"
+          print frontfactor
+          print $ simplify frontfactor
+          print backfactor
+          print $ simplify backfactor
+          print $ simplify $ a <.> star a
+          print $ simplify $ star a <.> a
