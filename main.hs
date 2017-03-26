@@ -14,7 +14,6 @@ data Regex = Symbol Char
            | Star Regex
            | Concat [Regex]
            | Union [Regex]
-           deriving Eq
 
 instance Show Regex where
   show (Symbol c)  = [c]
@@ -31,6 +30,20 @@ instance Show Regex where
                      bracket r' = show r'
   show (Union []) = "∅"
   show (Union rs)  = intercalate "|" $ map show rs
+
+instance Eq Regex where
+  (Symbol a) == (Symbol b)   = a == b
+  Epsilon == Epsilon         = True
+  Epsilon == (Concat [])     = True
+  (Concat []) == Epsilon     = True
+  Empty == Empty             = True
+  Empty == (Union [])        = True
+  (Union []) == Empty        = True
+  (Star r) == (Star q)       = r == q
+  (Concat rs) == (Concat qs) = rs == qs
+  (Union []) == (Union [])   = True
+  (Union (r:rs)) == (Union qs) =  r `elem` qs && (Union rs == Union (filter (/= r) qs))
+  r == q                     = False
 
 
 -- Operators
@@ -118,21 +131,52 @@ simplify' (Concat rs)
   | Empty `elem` rs = Empty
   
   -- Push things through stars from back to front (abc...k)*b -> a(bc...kb)*
-  | any isStar rs && pushable afterStar
+  | anyPushable afterStar
     = let newAfter = case afterStar of
-                          Star (Concat (c:cs)):r:rs' -> c:Star (Concat (cs ++ [r])):rs'
-                          Star c:r:rs'               -> r:Star c:rs'
-       in simplify' $ Concat $ beforeStar ++ newAfter
+                          q@(Star (Concat (c:cs))):r:rs'
+                            -> if c == r
+                                 then fromConcat $ simplify' $ Concat $ c:Star (Concat (cs ++ [r])):rs'
+                                 else q : fromConcat (simplify' (Concat (r:rs')))
+                          q@(Star c):r:rs'
+                            -> if c == r
+                                 then fromConcat $ simplify' $ Concat $ r:Star c:rs'
+                                 else q : fromConcat (simplify' (Concat (r:rs')))
+                          q:r:rs'
+                            -> q : fromConcat ( simplify' (Concat (r:rs')))
+                          rs'
+                            -> rs'
+      in simplify' $ Concat $ beforeStar ++ newAfter
+
+  -- R*R* -> R*
+  | equalAdjStars rs
+    = let newAfter = case afterStar of
+                          q:r:rs' -> if q == r
+                                       then fromConcat $ simplify' $ Concat (r:rs')
+                                       else q : fromConcat (simplify' (Concat (r:rs')))
+                          _       -> afterStar
+      in Concat $ beforeStar ++ newAfter
 
   -- Recursively simplify the concatenation, and remove epsilons
   | otherwise       = Concat $ map simplify' $ filter (/= Concat []) rs
 
   where isStar (Star _) = True
         isStar _        = False
+        -- hasStar = any isStar rs
         (beforeStar, afterStar) = break isStar rs
+
         pushable (Star (Concat (r:_)):q:_) = r == q
         pushable (Star r:q:_)              = r == q
         pushable _                         = False
+        
+        anyPushable [] = False
+        anyPushable (r:rs') = pushable (r:rs') || anyPushable rs'
+
+        equalAdjStars (q:r:rs') = (isStar q && q == r) || equalAdjStars (r:rs')
+        equalAdjStars rs'       = False
+
+        fromConcat r = case r of
+                            Concat rs -> rs
+                            _         -> [r]
 
 -- Union Simplifications
 simplify' (Union rs) 
@@ -190,7 +234,7 @@ simplify' (Union rs)
 simplify' (Star r)
   = case r of
          (Star r') -> simplify' (Star r')
-         Epsilon   -> Epsilon
+         Epsilon   -> Concat []
          Concat [] -> Concat []
          Empty     -> Concat []
          _         -> Star (simplify' r)
@@ -216,7 +260,6 @@ rev (Union rs) = Union $ map rev rs
 rev (Star r) = Star $ rev r
 rev r = r
 
-
 longestCommonPrefix :: Eq a => [[a]] -> [a]
 longestCommonPrefix xs 
   = case xs of
@@ -228,7 +271,6 @@ longestCommonPrefix xs
         lcp (x:xs) (y:ys) = if x == y then x:lcp xs ys else []
 
 
-
 re = Star $ Star $ Union [ Concat [Epsilon, Concat [Symbol 'c', Epsilon]]
                          , Symbol 'c'
                          , Star (Concat [Symbol 'a', Symbol 'b'])
@@ -237,8 +279,12 @@ re = Star $ Star $ Union [ Concat [Epsilon, Concat [Symbol 'c', Epsilon]]
 re2 = Concat [Epsilon, Concat [Symbol 'c', Epsilon]]
 a = Symbol 'a'
 b = Symbol 'b'
+c = Symbol 'c'
 
 aa' = star (a <.> a)
+ab' = star (a <.> b)
+ac' = star (a <.> c)
+ca' = star (c <.> a)
 m1 = a <.> aa' <.> b
 m2 = aa' <.> b <.> b
 m = m1 <+> m2
@@ -253,7 +299,10 @@ aaplus' = Union [Epsilon, Concat [Concat [a,a], Star $ Concat [a, a]]]
 plusaa' = Union [Concat [Star $ Concat [a, a], Concat [a,a]], Epsilon]
 frontfactor = a <+> a <.> a <.> star a
 backfactor = a <+> star a <.> a <.> a
+multifactor = ac' <.> ab' <.> a <+> a <.> ca' <.> ab' <.> b
+seqstar = aa' <.> aa' <.> a <+> a <.> aa' <.> aa' <.> b
 
+jess = a <.> star ( c <+> b <.> a ) <.> b <+> Epsilon
 
 testMatch :: IO ()
 testMatch = print "Testing:..." >> mapM_ test cases
@@ -321,7 +370,6 @@ main = do print re
           print $ simplify re2
           print m
           print $ simplify m
-          print "Reverse"
           print $ rev m
           print $ simplify $ rev m
           print m'
@@ -338,5 +386,11 @@ main = do print re
           print $ simplify frontfactor
           print backfactor
           print $ simplify backfactor
+          print multifactor
+          print $ simplify multifactor
+          print seqstar
+          print $ simplify seqstar
           print $ simplify $ a <.> star a
           print $ simplify $ star a <.> a
+          print jess
+          print $ simplify jess
