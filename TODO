@@ -1,0 +1,8 @@
+-- RE -> NFA
+-- NFA -> DFA
+-- DFA -> Minimal DFA
+-- Run DFA/NFA
+
+-- Improve RE simplification (look in regex.hs)
+
+
