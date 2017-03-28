@@ -3,6 +3,7 @@
 -- DFA -> Minimal DFA
 -- Run DFA/NFA
 
+-- Read regexes
 -- Improve RE simplification (look in regex.hs)
 
 

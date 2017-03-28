@@ -6,7 +6,7 @@ import Data.Function
 -- A regular expression; we will allow union and concatenation operations to 
 -- take an arbitrary number of operands. The concatenation of 0 expressions
 -- is equivalent to epsilon, while the union of 0 expressions is equivalent
--- to the empty expression. The concatenation of union of a simple expression
+-- to the empty expression. The concatenation or union of a single expression
 -- is equivalent to the expression itself.
 data Regex = Symbol Char
            | Epsilon
